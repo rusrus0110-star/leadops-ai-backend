@@ -7,6 +7,7 @@ import leadRoutes from "./routes/lead_routes.js";
 
 import { notFoundMiddleware } from "./middlewares/not_found_middleware.js";
 import { errorMiddleware } from "./middlewares/error_middleware.js";
+import hubspotRoutes from "./routes/hubspot_routes.js";
 
 const app = express();
 
@@ -30,6 +31,7 @@ if (process.env.NODE_ENV !== "production") {
 
 app.use("/api/health", healthRoutes);
 app.use("/api/leads", leadRoutes);
+app.use("/api/hubspot", hubspotRoutes);
 
 app.use(notFoundMiddleware);
 app.use(errorMiddleware);

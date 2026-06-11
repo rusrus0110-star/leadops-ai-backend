@@ -7,12 +7,12 @@ const companySizeScores = {
 };
 
 const budgetScores = {
-  "Not sure yet": 0,
-  "Under €2,000": 5,
-  "€2,000–€5,000": 10,
-  "€5,000–€10,000": 20,
-  "€10,000–€25,000": 30,
-  "€25,000+": 40,
+  not_sure: 0,
+  under_2000: 5,
+  "2000-5000": 10,
+  "5000-10000": 20,
+  "10000-25000": 30,
+  "25000_plus": 40,
 };
 
 const strategicInterestScores = {
@@ -66,11 +66,7 @@ const calculateDataQualityScore = ({
     score += 15;
   }
 
-  if (score > 100) {
-    return 100;
-  }
-
-  return score;
+  return Math.min(score, 100);
 };
 
 export const calculateLeadScore = ({
@@ -90,6 +86,7 @@ export const calculateLeadScore = ({
   });
 
   const dataQualityContribution = Math.round(dataQualityScore * 0.25);
+
   score += dataQualityContribution;
 
   scoreBreakdown.push({
@@ -99,6 +96,7 @@ export const calculateLeadScore = ({
   });
 
   const companySizeScore = companySizeScores[leadData.companySize] || 0;
+
   score += companySizeScore;
 
   scoreBreakdown.push({
@@ -108,6 +106,7 @@ export const calculateLeadScore = ({
   });
 
   const budgetScore = budgetScores[leadData.budgetRange] || 0;
+
   score += budgetScore;
 
   scoreBreakdown.push({
@@ -117,6 +116,7 @@ export const calculateLeadScore = ({
   });
 
   const interestScore = strategicInterestScores[leadData.interest] || 0;
+
   score += interestScore;
 
   scoreBreakdown.push({
@@ -126,6 +126,7 @@ export const calculateLeadScore = ({
   });
 
   const sourceScore = sourceScores[leadData.source] || 0;
+
   score += sourceScore;
 
   scoreBreakdown.push({

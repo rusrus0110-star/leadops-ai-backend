@@ -220,12 +220,12 @@ const leadSchema = new mongoose.Schema(
       type: String,
       required: true,
       enum: [
-        "Not sure yet",
-        "Under €2,000",
-        "€2,000–€5,000",
-        "€5,000–€10,000",
-        "€10,000–€25,000",
-        "€25,000+",
+        "not_sure",
+        "under_2000",
+        "2000-5000",
+        "5000-10000",
+        "10000-25000",
+        "25000_plus",
       ],
     },
     message: {
