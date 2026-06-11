@@ -13,31 +13,44 @@ const getHubSpotToken = () => {
 
 const hubspotRequest = async ({ endpoint, method = "GET", body = null }) => {
   const token = getHubSpotToken();
+  const url = `${HUBSPOT_BASE_URL}${endpoint}`;
 
-  const response = await fetch(`${HUBSPOT_BASE_URL}${endpoint}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: body ? JSON.stringify(body) : null,
-  });
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: body ? JSON.stringify(body) : null,
+    });
 
-  const responseData = await response.json().catch(() => null);
+    const responseData = await response.json().catch(() => null);
 
-  if (!response.ok) {
-    const message =
-      responseData?.message ||
-      responseData?.error ||
-      `HubSpot request failed with status ${response.status}`;
+    if (!response.ok) {
+      const message =
+        responseData?.message ||
+        responseData?.error ||
+        `HubSpot request failed with status ${response.status}`;
 
-    const error = new Error(message);
-    error.statusCode = response.status;
-    error.hubspotResponse = responseData;
+      const error = new Error(message);
+      error.statusCode = response.status;
+      error.hubspotResponse = responseData;
+      throw error;
+    }
+
+    return responseData;
+  } catch (error) {
+    console.error("HubSpot request failed:", {
+      url,
+      method,
+      message: error.message,
+      cause: error.cause,
+      hubspotResponse: error.hubspotResponse,
+    });
+
     throw error;
   }
-
-  return responseData;
 };
 
 const searchContactByEmail = async (email) => {
@@ -83,7 +96,7 @@ const searchCompanyByDomain = async (domain) => {
         ],
       },
     ],
-    properties: ["name", "domain", "website", "industry"],
+    properties: ["name", "domain", "website"],
     limit: 1,
   };
 
@@ -96,6 +109,14 @@ const searchCompanyByDomain = async (domain) => {
   return result?.results?.[0] || null;
 };
 
+const getSafeString = (value, fallback = "not_available") => {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  return String(value);
+};
+
 const buildAiRecommendationText = (lead) => {
   const recommendation = lead.aiRecommendation || {};
 
@@ -104,64 +125,79 @@ const buildAiRecommendationText = (lead) => {
     : "";
 
   return [
-    `Lead priority: ${lead.leadPriority}`,
-    `Lead score: ${lead.leadScore}/100`,
-    `Data quality score: ${lead.dataQualityScore}/100`,
-    `Email validation: ${lead.emailValidation?.status || "not_checked"}`,
-    `Phone validation: ${lead.phoneValidation?.status || "not_checked"}`,
-    `Website validation: ${lead.websiteValidation?.status || "not_checked"}`,
-    `Risk level: ${recommendation.riskLevel || "not_defined"}`,
-    `Suggested contact channel: ${recommendation.suggestedContactChannel || "not_defined"}`,
-    `Recommended action: ${recommendation.recommendedAction || "Not generated"}`,
-    `Summary: ${recommendation.summary || "No summary generated"}`,
+    `Lead priority: ${getSafeString(lead.leadPriority)}`,
+    `Lead score: ${getSafeString(lead.leadScore)}/100`,
+    `Data quality score: ${getSafeString(lead.dataQualityScore)}/100`,
+    `Email validation: ${getSafeString(lead.emailValidation?.status, "not_checked")}`,
+    `Phone validation: ${getSafeString(lead.phoneValidation?.status, "not_checked")}`,
+    `Website validation: ${getSafeString(lead.websiteValidation?.status, "not_checked")}`,
+    `Risk level: ${getSafeString(recommendation.riskLevel)}`,
+    `Suggested contact channel: ${getSafeString(recommendation.suggestedContactChannel)}`,
+    `Recommended action: ${getSafeString(recommendation.recommendedAction, "Not generated")}`,
+    `Summary: ${getSafeString(recommendation.summary, "No summary generated")}`,
     `Pain points: ${painPoints || "No pain points detected"}`,
-    `Suggested email draft: ${recommendation.emailDraft || "No email draft generated"}`,
+    `Suggested email draft: ${getSafeString(recommendation.emailDraft, "No email draft generated")}`,
   ].join("\n");
 };
 
-const mapIndustryToHubSpotIndustry = (industry) => {
-  const industryMap = {
-    "SaaS / Software": "COMPUTER_SOFTWARE",
-    "E-commerce": "INTERNET",
-    Manufacturing: "INDUSTRIAL_AUTOMATION",
-    Construction: "CONSTRUCTION",
-    Consulting: "MANAGEMENT_CONSULTING",
-    Healthcare: "HOSPITAL_HEALTH_CARE",
-    Logistics: "LOGISTICS_AND_SUPPLY_CHAIN",
-    Finance: "FINANCIAL_SERVICES",
-    Other: "",
-  };
-
-  return industryMap[industry] || "";
-};
-
 const buildContactProperties = (lead) => {
-  return {
-    email: lead.email,
-    firstname: lead.firstName,
-    lastname: lead.lastName,
-    phone: lead.phoneValidation?.normalizedPhone || lead.phone || "",
-    jobtitle: lead.jobTitle || "",
-    company: lead.companyName,
+  const aiRecommendationText = buildAiRecommendationText(lead);
+
+  const properties = {
+    email: getSafeString(lead.email),
+    firstname: getSafeString(lead.firstName),
+    lastname: getSafeString(lead.lastName),
+    phone: getSafeString(
+      lead.phoneValidation?.normalizedPhone || lead.phone,
+      "",
+    ),
+    jobtitle: getSafeString(lead.jobTitle, ""),
+    company: getSafeString(lead.companyName, ""),
+
+    leadops_lead_score: getSafeString(lead.leadScore, "0"),
+    leadops_lead_priority: getSafeString(lead.leadPriority, "not_defined"),
+    leadops_data_quality_score: getSafeString(lead.dataQualityScore, "0"),
+    leadops_email_validation_status: getSafeString(
+      lead.emailValidation?.status,
+      "not_checked",
+    ),
+    leadops_phone_validation_status: getSafeString(
+      lead.phoneValidation?.status,
+      "not_checked",
+    ),
+    leadops_website_validation_status: getSafeString(
+      lead.websiteValidation?.status,
+      "not_checked",
+    ),
+    leadops_ai_recommendation: aiRecommendationText,
   };
+
+  console.log("Lead values before HubSpot sync:", {
+    leadId: lead._id,
+    email: lead.email,
+    leadScore: lead.leadScore,
+    leadPriority: lead.leadPriority,
+    dataQualityScore: lead.dataQualityScore,
+    emailValidationStatus: lead.emailValidation?.status,
+    phoneValidationStatus: lead.phoneValidation?.status,
+    websiteValidationStatus: lead.websiteValidation?.status,
+    aiRecommendation: lead.aiRecommendation,
+  });
+
+  console.log("HubSpot contact properties payload:", properties);
+
+  return properties;
 };
 
 const buildCompanyProperties = (lead) => {
   const websiteUrl = lead.websiteValidation?.url || lead.companyWebsite || "";
   const domain = lead.websiteValidation?.domain || "";
-  const hubspotIndustry = mapIndustryToHubSpotIndustry(lead.industry);
 
-  const properties = {
-    name: lead.companyName,
-    domain,
-    website: websiteUrl,
+  return {
+    name: getSafeString(lead.companyName),
+    domain: getSafeString(domain, ""),
+    website: getSafeString(websiteUrl, ""),
   };
-
-  if (hubspotIndustry) {
-    properties.industry = hubspotIndustry;
-  }
-
-  return properties;
 };
 
 export const createOrUpdateHubSpotContact = async (lead) => {
@@ -251,6 +287,5 @@ export const syncLeadToHubSpot = async (lead) => {
     contactOperation: contactResult.operation,
     companyId: companyResult.id,
     companyOperation: companyResult.operation,
-    aiRecommendationPreview: buildAiRecommendationText(lead),
   };
 };
