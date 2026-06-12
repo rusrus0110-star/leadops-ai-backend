@@ -1,169 +1,577 @@
 import OpenAI from "openai";
 
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const getOpenAIClient = () => {
+  const apiKey = process.env.OPENAI_API_KEY;
 
-const getSafeString = (value, fallback = "not provided") => {
-  if (value === null || value === undefined || value === "") {
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is not defined");
+  }
+
+  return new OpenAI({ apiKey });
+};
+
+const getSafeString = (
+  value,
+  fallback = "Not provided",
+) => {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
     return fallback;
   }
 
   return String(value);
 };
 
-const getOpenAiClient = () => {
-  if (!process.env.OPENAI_API_KEY) {
-    return null;
+const extractJson = (content) => {
+  if (!content) {
+    throw new Error(
+      "OpenAI returned an empty response",
+    );
   }
 
-  return new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  });
-};
+  const cleanedContent = content
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
 
-const buildLeadPrompt = (lead) => {
-  return `
-You are an AI assistant for B2B sales operations.
-
-Analyze the following lead and return a strict JSON object only.
-Do not include markdown.
-Do not include explanations outside JSON.
-
-Lead data:
-- First name: ${getSafeString(lead.firstName)}
-- Last name: ${getSafeString(lead.lastName)}
-- Email: ${getSafeString(lead.email)}
-- Phone: ${getSafeString(lead.phone)}
-- Company name: ${getSafeString(lead.companyName)}
-- Company website: ${getSafeString(lead.companyWebsite)}
-- Job title: ${getSafeString(lead.jobTitle)}
-- Company size: ${getSafeString(lead.companySize)}
-- Industry: ${getSafeString(lead.industry)}
-- Country: ${getSafeString(lead.country)}
-- Interest: ${getSafeString(lead.interest)}
-- Budget range: ${getSafeString(lead.budgetRange)}
-- Message: ${getSafeString(lead.message)}
-- Source: ${getSafeString(lead.source)}
-- UTM source: ${getSafeString(lead.utmSource)}
-- UTM campaign: ${getSafeString(lead.utmCampaign)}
-
-Validation and scoring:
-- Lead score: ${getSafeString(lead.leadScore)}
-- Lead priority: ${getSafeString(lead.leadPriority)}
-- Data quality score: ${getSafeString(lead.dataQualityScore)}
-- Email validation status: ${getSafeString(lead.emailValidation?.status)}
-- Email validation reason: ${getSafeString(lead.emailValidation?.reason)}
-- Phone validation status: ${getSafeString(lead.phoneValidation?.status)}
-- Website validation status: ${getSafeString(lead.websiteValidation?.status)}
-
-Return exactly this JSON structure:
-{
-  "summary": "short business summary of the lead",
-  "painPoints": ["pain point 1", "pain point 2"],
-  "recommendedAction": "clear next action for sales",
-  "suggestedContactChannel": "email | phone | email_then_phone | manual_review",
-  "riskLevel": "low | medium | high",
-  "emailDraft": "short professional first outreach email"
-}
-
-Rules:
-- suggestedContactChannel must be one of: email, phone, email_then_phone, manual_review.
-- riskLevel must be one of: low, medium, high.
-- painPoints must contain 1 to 4 items.
-- emailDraft must be concise and business-like.
-- If email validation is warning or invalid, prefer phone or email_then_phone.
-- If data quality is low, mention manual review risk.
-`;
-};
-
-const parseJsonResponse = (text) => {
   try {
-    return JSON.parse(text);
+    return JSON.parse(cleanedContent);
   } catch {
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const firstBrace =
+      cleanedContent.indexOf("{");
 
-    if (!jsonMatch) {
-      throw new Error("OpenAI response did not contain valid JSON");
+    const lastBrace =
+      cleanedContent.lastIndexOf("}");
+
+    if (
+      firstBrace === -1 ||
+      lastBrace === -1
+    ) {
+      throw new Error(
+        "OpenAI response does not contain valid JSON",
+      );
     }
 
-    return JSON.parse(jsonMatch[0]);
+    return JSON.parse(
+      cleanedContent.slice(
+        firstBrace,
+        lastBrace + 1,
+      ),
+    );
   }
 };
 
-const validateAiRecommendation = (recommendation) => {
+const normalizePainPoints = (
+  painPoints,
+  leadMessage = "",
+) => {
+  const blockedPatterns = [
+    /^interest in\b/i,
+    /^potential need\b/i,
+    /described in (the )?message/i,
+    /^message:/i,
+  ];
+
+  const normalizedPainPoints =
+    Array.isArray(painPoints)
+      ? painPoints
+          .filter(
+            (item) =>
+              typeof item === "string",
+          )
+          .map((item) =>
+            item
+              .replace(/\s+/g, " ")
+              .trim(),
+          )
+          .filter(Boolean)
+          .filter(
+            (item) =>
+              !blockedPatterns.some(
+                (pattern) =>
+                  pattern.test(item),
+              ),
+          )
+          .filter(
+            (item) =>
+              item.length <= 160,
+          )
+          .slice(0, 2)
+      : [];
+
+  if (
+    normalizedPainPoints.length === 2
+  ) {
+    return normalizedPainPoints;
+  }
+
+  const message = getSafeString(
+    leadMessage,
+    "",
+  ).toLowerCase();
+
+  const fallbackPainPoints = [];
+
+  if (
+    message.includes(
+      "different channels",
+    ) ||
+    message.includes(
+      "multiple channels",
+    ) ||
+    message.includes(
+      "customer requests",
+    )
+  ) {
+    fallbackPainPoints.push(
+      "Customer requests from multiple channels are difficult to consolidate and prioritize.",
+    );
+  }
+
+  if (
+    message.includes("lead") ||
+    message.includes("follow-up") ||
+    message.includes("follow up") ||
+    message.includes("crm")
+  ) {
+    fallbackPainPoints.push(
+      "Manual lead qualification can delay follow-up and increase the risk of missed opportunities.",
+    );
+  }
+
+  const defaults = [
+    "Incoming lead data requires consistent validation before sales follow-up.",
+    "Sales teams need a clear priority and next action for every new inquiry.",
+  ];
+
+  return [
+    ...normalizedPainPoints,
+    ...fallbackPainPoints,
+    ...defaults,
+  ]
+    .filter(
+      (item, index, items) =>
+        items.indexOf(item) === index,
+    )
+    .slice(0, 2);
+};
+
+const normalizeRiskLevel = (
+  riskLevel,
+) => {
+  const normalized = getSafeString(
+    riskLevel,
+    "medium",
+  ).toLowerCase();
+
+  if (
+    normalized === "low" ||
+    normalized === "medium" ||
+    normalized === "high"
+  ) {
+    return normalized;
+  }
+
+  return "medium";
+};
+
+const normalizeContactChannel = (
+  channel,
+) => {
+  const normalized = getSafeString(
+    channel,
+    "email",
+  )
+    .toLowerCase()
+    .replaceAll(" ", "_");
+
   const allowedChannels = [
     "email",
     "phone",
-    "email_then_phone",
+    "linkedin",
+    "video_call",
     "manual_review",
   ];
-  const allowedRiskLevels = ["low", "medium", "high"];
 
-  return {
-    summary: getSafeString(recommendation.summary, "No AI summary generated."),
-    painPoints: Array.isArray(recommendation.painPoints)
-      ? recommendation.painPoints.slice(0, 4).map(String)
-      : ["No clear pain points detected."],
-    recommendedAction: getSafeString(
-      recommendation.recommendedAction,
-      "Review the lead manually and decide the next sales action.",
-    ),
-    suggestedContactChannel: allowedChannels.includes(
-      recommendation.suggestedContactChannel,
+  return allowedChannels.includes(
+    normalized,
+  )
+    ? normalized
+    : "email";
+};
+
+const buildFallbackEmailDraft = ({
+  firstName,
+  companyName,
+}) => {
+  return [
+    `Hi ${firstName},`,
+    "",
+    `Thank you for your request. LeadOps AI could help ${companyName} consolidate incoming requests, prioritize leads and improve CRM follow-up.`,
+    "",
+    "Would Thursday at 10:00 CET or Friday at 14:00 CET work for a 30-minute discovery call?",
+    "",
+    "Best regards,",
+    "LeadOps AI Team",
+  ].join("\n");
+};
+
+const normalizeEmailDraft = ({
+  emailDraft,
+  firstName,
+  companyName,
+}) => {
+  const fallbackEmail =
+    buildFallbackEmailDraft({
+      firstName,
+      companyName,
+    });
+
+  if (
+    typeof emailDraft !== "string" ||
+    !emailDraft.trim()
+  ) {
+    return fallbackEmail;
+  }
+
+  const normalizedLines = emailDraft
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter(
+      (line) =>
+        !/^hi\s+/i.test(line),
     )
-      ? recommendation.suggestedContactChannel
-      : "manual_review",
-    riskLevel: allowedRiskLevels.includes(recommendation.riskLevel)
-      ? recommendation.riskLevel
-      : "medium",
-    emailDraft: getSafeString(
-      recommendation.emailDraft,
-      "Hello, thank you for your interest. I would be happy to discuss your current process and possible next steps.",
-    ),
-  };
-};
-
-const generateFallbackRecommendation = (lead) => {
-  return {
-    summary: `${lead.companyName} is a B2B lead interested in ${lead.interest}.`,
-    painPoints: [
-      `Interest in ${lead.interest}`,
-      "Potential need for better lead qualification and CRM workflow",
-    ],
-    recommendedAction:
-      "Contact the lead within 24 hours and offer a short discovery call.",
-    suggestedContactChannel: "email_then_phone",
-    riskLevel: "medium",
-    emailDraft: `Hi ${lead.firstName}, thank you for your request. Based on your message, it looks like ${lead.companyName} may benefit from a structured approach to lead qualification and CRM automation. I would be happy to schedule a short discovery call to better understand your current process and discuss possible next steps.`,
-  };
-};
-
-export const generateAiRecommendation = async (lead) => {
-  const openai = getOpenAiClient();
-
-  if (!openai) {
-    console.warn(
-      "OPENAI_API_KEY is not defined. Falling back to mock AI recommendation.",
+    .filter(
+      (line) =>
+        !/^best regards/i.test(line),
+    )
+    .filter(
+      (line) =>
+        !/^leadops ai team$/i.test(
+          line,
+        ),
+    )
+    .filter(
+      (line) =>
+        !/30-minute discovery call/i.test(
+          line,
+        ),
+    )
+    .filter(
+      (line) =>
+        !/which time works better/i.test(
+          line,
+        ),
     );
 
-    return generateFallbackRecommendation(lead);
-  }
+  const mainText = normalizedLines
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  const prompt = buildLeadPrompt(lead);
+  const conciseMainText = mainText
+    ? mainText.length > 260
+      ? `${mainText
+          .slice(0, 259)
+          .trim()}…`
+      : mainText
+    : `Thank you for your request. LeadOps AI could help ${companyName} consolidate incoming requests, prioritize leads and improve CRM follow-up.`;
 
-  const response = await openai.responses.create({
-    model: OPENAI_MODEL,
-    input: prompt,
-    temperature: 0.2,
-    max_output_tokens: 900,
-  });
-
-  const outputText = response.output_text;
-
-  if (!outputText) {
-    throw new Error("OpenAI response is empty");
-  }
-
-  const parsedRecommendation = parseJsonResponse(outputText);
-
-  return validateAiRecommendation(parsedRecommendation);
+  return [
+    `Hi ${firstName},`,
+    "",
+    conciseMainText,
+    "",
+    "Would Thursday at 10:00 CET or Friday at 14:00 CET work for a 30-minute discovery call?",
+    "",
+    "Best regards,",
+    "LeadOps AI Team",
+  ].join("\n");
 };
+
+const buildLeadContext = ({
+  leadData,
+  emailValidation,
+  phoneValidation,
+  websiteValidation,
+}) => {
+  return {
+    firstName: getSafeString(
+      leadData.firstName,
+      "there",
+    ),
+
+    lastName: getSafeString(
+      leadData.lastName,
+    ),
+
+    email: getSafeString(
+      leadData.email,
+    ),
+
+    phone: getSafeString(
+      leadData.phone,
+    ),
+
+    jobTitle: getSafeString(
+      leadData.jobTitle,
+    ),
+
+    companyName: getSafeString(
+      leadData.companyName,
+      "the company",
+    ),
+
+    companyWebsite: getSafeString(
+      leadData.companyWebsite,
+    ),
+
+    industry: getSafeString(
+      leadData.industry,
+    ),
+
+    country: getSafeString(
+      leadData.country,
+    ),
+
+    companySize: getSafeString(
+      leadData.companySize,
+    ),
+
+    source: getSafeString(
+      leadData.source,
+    ),
+
+    budget: getSafeString(
+      leadData.budget,
+    ),
+
+    message: getSafeString(
+      leadData.message,
+    ),
+
+    emailValidationStatus:
+      getSafeString(
+        emailValidation?.status,
+        "not_checked",
+      ),
+
+    emailValidationReason:
+      getSafeString(
+        emailValidation?.reason ||
+          emailValidation?.message,
+      ),
+
+    phoneValidationStatus:
+      getSafeString(
+        phoneValidation?.status,
+        "not_checked",
+      ),
+
+    websiteValidationStatus:
+      getSafeString(
+        websiteValidation?.status,
+        "not_checked",
+      ),
+
+    websiteDomain: getSafeString(
+      websiteValidation?.domain,
+    ),
+  };
+};
+
+export const generateAiRecommendation =
+  async ({
+    leadData,
+    emailValidation,
+    phoneValidation,
+    websiteValidation,
+  }) => {
+    if (!leadData) {
+      throw new Error(
+        "leadData is required for AI recommendation",
+      );
+    }
+
+    const client =
+      getOpenAIClient();
+
+    const model =
+      process.env.OPENAI_MODEL ||
+      "gpt-4.1-mini";
+
+    const leadContext =
+      buildLeadContext({
+        leadData,
+        emailValidation,
+        phoneValidation,
+        websiteValidation,
+      });
+
+    const prompt = `
+You are a B2B sales operations assistant.
+
+Analyse the lead and return a concise, practical recommendation for a sales manager.
+
+LEAD DATA:
+${JSON.stringify(leadContext, null, 2)}
+
+Return ONLY valid JSON with this structure:
+
+{
+  "summary": "string",
+  "painPoints": ["string", "string"],
+  "riskLevel": "low | medium | high",
+  "recommendedAction": "string",
+  "suggestedContactChannel": "email | phone | linkedin | video_call | manual_review",
+  "emailDraft": "string"
+}
+
+RULES:
+
+SUMMARY
+- Maximum 2 short sentences.
+- Explain the company need and likely business value.
+- Do not repeat all input fields.
+- Do not copy the original message verbatim.
+
+PAIN POINTS
+- Return exactly 2 concrete operational business problems.
+- Each pain point must describe a negative operational consequence.
+- Do not return "Interest in API integration".
+- Do not return "Potential need described in message".
+- Do not start with "Interest in", "Potential need", or "Message".
+- Do not quote or truncate the original lead message.
+- For multichannel requests, focus on consolidation, prioritization and delayed follow-up.
+- Example:
+  "Customer requests from multiple channels are difficult to consolidate and prioritize."
+  "Manual lead qualification can delay follow-up and increase the risk of missed opportunities."
+
+RISK LEVEL
+- Use only low, medium or high.
+- Consider validation results, data quality and buying intent.
+
+RECOMMENDED ACTION
+- Maximum 2 short sentences.
+- Recommend a 30-minute discovery call.
+- The lead should receive a response within one business day.
+
+CONTACT CHANNEL
+- Use only one allowed value.
+- Prefer email when email is usable.
+- Prefer phone when email is invalid and phone is valid.
+
+EMAIL DRAFT
+- Professional B2B English.
+- Keep the full email short.
+- Do not include a subject line.
+- Do not use markdown.
+- Do not invent unsupported features.
+- Use this exact structure:
+
+Hi FirstName,
+
+One short paragraph thanking the lead and connecting the business problem to the proposed solution.
+
+Would Thursday at 10:00 CET or Friday at 14:00 CET work for a 30-minute discovery call?
+
+Best regards,
+LeadOps AI Team
+
+- Preserve blank lines.
+- Include both proposed times.
+`;
+
+    const completion =
+      await client.chat.completions.create(
+        {
+          model,
+          temperature: 0.2,
+
+          response_format: {
+            type: "json_object",
+          },
+
+          messages: [
+            {
+              role: "system",
+              content:
+                "Return concise B2B sales recommendations as valid JSON only.",
+            },
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+        },
+      );
+
+    const content =
+      completion.choices?.[0]
+        ?.message?.content;
+
+    const parsedRecommendation =
+      extractJson(content);
+
+    const firstName =
+      getSafeString(
+        leadData.firstName,
+        "there",
+      );
+
+    const companyName =
+      getSafeString(
+        leadData.companyName,
+        "your company",
+      );
+
+    return {
+      summary: getSafeString(
+        parsedRecommendation.summary,
+        "The lead requires manual review.",
+      ),
+
+      painPoints: normalizePainPoints(
+        parsedRecommendation.painPoints,
+        leadData.message,
+      ),
+
+      riskLevel: normalizeRiskLevel(
+        parsedRecommendation.riskLevel,
+      ),
+
+      recommendedAction:
+        getSafeString(
+          parsedRecommendation
+            .recommendedAction,
+          "Contact the lead within one business day and arrange a 30-minute discovery call.",
+        ),
+
+      suggestedContactChannel:
+        normalizeContactChannel(
+          parsedRecommendation
+            .suggestedContactChannel,
+        ),
+
+      emailDraft:
+        normalizeEmailDraft({
+          emailDraft:
+            parsedRecommendation
+              .emailDraft,
+
+          firstName,
+          companyName,
+        }),
+
+      generatedAt: new Date(),
+      model,
+    };
+  };
+
